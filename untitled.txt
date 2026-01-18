@@ -1,0 +1,217 @@
+import logging
+import sqlite3
+from datetime import date
+from aiogram import Bot, Dispatcher, executor, types
+
+TOKEN = "7619882387:AAF6ZKrCzV9ma7xM_tAUOOkd_xdJ3qtqWpc"
+ADMIN = [@Omor0707]
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
+
+conn = sqlite3.connect('studentsource.db')
+cur = conn.cursor()
+
+# Users table
+cur.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER,
+    balance REAL,
+    coins INTEGER,
+    ref_by INTEGER,
+    active INTEGER,
+    level1 INTEGER,
+    level2 INTEGER,
+    level3 INTEGER,
+    last_work TEXT
+)
+''')
+
+# Withdraw table
+cur.execute('''
+CREATE TABLE IF NOT EXISTS withdraws (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount REAL,
+    number TEXT,
+    method TEXT,
+    status TEXT
+)
+''')
+conn.commit()
+
+FIRST = 2
+SECOND = 1
+THIRD = 1
+WORK_COIN = 10
+COIN_RATE = 100
+BONUS = 10
+
+# ---------- USER CREATE ----------
+def add_user(uid, ref=None):
+    cur.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+    if cur.fetchone() is None:
+        cur.execute(
+            "INSERT INTO users (user_id,balance,coins,ref_by,active,level1,level2,level3,last_work) VALUES (?,?,?,?,0,0,0,0,'')",
+            (uid, 0, 0, ref)
+        )
+        conn.commit()
+        if ref:
+            give_ref_income(uid)
+
+# ---------- 3 LEVEL REF INCOME ----------
+def give_ref_income(new_user):
+    cur.execute("SELECT ref_by FROM users WHERE user_id=?", (new_user,))
+    p1 = cur.fetchone()
+    if not p1: return
+    lvl1 = p1[0]
+
+    if lvl1:
+        update_lvl_income(lvl1, FIRST, 'level1')
+        cur.execute("SELECT ref_by FROM users WHERE user_id=?", (lvl1,))
+        p2 = cur.fetchone()
+        if p2:
+            lvl2 = p2[0]
+            if lvl2:
+                update_lvl_income(lvl2, SECOND, 'level2')
+                cur.execute("SELECT ref_by FROM users WHERE user_id=?", (lvl2,))
+                p3 = cur.fetchone()
+                if p3:
+                    lvl3 = p3[0]
+                    if lvl3:
+                        update_lvl_income(lvl3, THIRD, 'level3')
+
+def update_lvl_income(uid, amount, lvlfield):
+    cur.execute(f"UPDATE users SET balance=balance+?, {lvlfield}={lvlfield}+1 WHERE user_id=?", (amount, uid))
+    conn.commit()
+
+# ---------- START ----------
+@dp.message_handler(commands=['start'])
+async def start(message: types.Message):
+    uid = message.from_user.id
+    ref = None
+    if len(message.text.split()) > 1:
+        try:
+            ref = int(message.text.split()[1])
+            if ref == uid: ref = None
+        except: ref = None
+
+    add_user(uid, ref)
+
+    await message.reply(
+        f"🎯 *Student Earn Pro*\n"
+        f"👤 User: {uid}\n"
+        f"🔗 Refer:\nhttps://t.me/{(await bot.get_me()).username}?start={uid}\n\n"
+        f"❗ Active করতে ২৫ টাকা দাও\n💰 Active হলে 10 টাকা বোনাস"
+    )
+
+# ---------- ACTIVE SYSTEM ----------
+@dp.message_handler(commands=['active'])
+async def activate(message: types.Message):
+    uid = message.from_user.id
+    if uid not in ADMIN:
+        return await message.reply("🛑 শুধুমাত্র অ্যাডমিন Active করতে পারবে")
+
+    try:
+        target = int(message.text.split()[1])
+    except:
+        return await message.reply("Format: /active user_id")
+
+    cur.execute("UPDATE users SET active=1, balance=balance+? WHERE user_id=?", (BONUS, target))
+    conn.commit()
+
+    await message.reply(f"✨ User {target} Active +10 টাকা")
+    try:
+        await bot.send_message(target, "🎉 Account Active!\n+10 টাকা যুক্ত হলো")
+    except:
+        pass
+
+# ---------- DAILY WORK ----------
+@dp.message_handler(commands=['work'])
+async def work(message: types.Message):
+    uid = message.from_user.id
+    cur.execute("SELECT active,last_work FROM users WHERE user_id=?", (uid,))
+    user = cur.fetchone()
+    if not user or user[0] == 0:
+        return await message.reply("❌ Account Active না!")
+
+    today = str(date.today())
+    if user[1] == today:
+        return await message.reply("🔁 আজকের কাজ already complete!")
+
+    cur.execute("UPDATE users SET coins=coins+?, last_work=? WHERE user_id=?", (WORK_COIN, today, uid))
+    conn.commit()
+    await message.reply(f"✔️ আজকের কাজ Done!\n➕ {WORK_COIN} coin")
+
+# ---------- CONVERT COIN ----------
+@dp.message_handler(commands=['convert'])
+async def convert(message: types.Message):
+    uid = message.from_user.id
+    cur.execute("SELECT coins FROM users WHERE user_id=?", (uid,))
+    coin = cur.fetchone()[0]
+
+    if coin < COIN_RATE:
+        return await message.reply(f"❌ {COIN_RATE} coin লাগবে")
+
+    money = (coin//COIN_RATE) * 2
+    used = (coin//COIN_RATE) * COIN_RATE
+    cur.execute("UPDATE users SET coins=coins-?, balance=balance+? WHERE user_id=?", (used, money, uid))
+    conn.commit()
+    await message.reply(f"💱 Exchange Done!\n+{money} টাকা")
+
+# ---------- WITHDRAW REQUEST ----------
+@dp.message_handler(commands=['withdraw'])
+async def withdraw(message: types.Message):
+    uid = message.from_user.id
+    parts = message.text.split()
+    if len(parts) != 4:
+        return await message.reply("Format: /withdraw amount number method")
+
+    amount = float(parts[1])
+    number = parts[2]
+    method = parts[3]
+
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+    bal = cur.fetchone()[0]
+    if bal < amount:
+        return await message.reply("❌ ব্যালান্স কম!")
+
+    cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, uid))
+    cur.execute("INSERT INTO withdraws (user_id,amount,number,method,status) VALUES (?,?,?,?,?)",
+                (uid, amount, number, method, "PENDING"))
+    conn.commit()
+
+    await message.reply("📩 Withdraw Request পাঠানো হয়েছে!")
+    for ad in ADMIN:
+        await bot.send_message(ad, f"🆕 Withdraw Request\nUser: {uid}\n💰 {amount}\n📱 {number}({method})")
+
+# ---------- ADMIN APPROVE ----------
+@dp.message_handler(commands=['pay'])
+async def pay(message: types.Message):
+    uid = message.from_user.id
+    if uid not in ADMIN:
+        return
+    try:
+        wid = int(message.text.split()[1])
+    except:
+        return await message.reply("Format: /pay request_id")
+
+    cur.execute("UPDATE withdraws SET status='PAID' WHERE id=?", (wid,))
+    conn.commit()
+    await message.reply("✔️ Approve Done")
+    cur.execute("SELECT user_id FROM withdraws WHERE id=?", (wid,))
+    u = cur.fetchone()[0]
+    await bot.send_message(u, "🎉 Withdraw Approved! টাকা পাঠিয়ে দেওয়া হয়েছে")
+
+# ---------- CHECK BALANCE ----------
+@dp.message_handler(commands=['balance'])
+async def balance(message: types.Message):
+    uid = message.from_user.id
+    cur.execute("SELECT balance,coins FROM users WHERE user_id=?", (uid,))
+    bal, coin = cur.fetchone()
+    await message.reply(f"💰 Balance: {bal}\n🟡 Coin: {coin}")
+
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
